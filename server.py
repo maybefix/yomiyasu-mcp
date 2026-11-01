@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -10,104 +11,111 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 ROOT = Path(__file__).resolve().parent
 UPSTREAM = ROOT / "upstream"
 CHECK = UPSTREAM / "scripts" / "yomiyasu_check.py"
-LINT = UPSTREAM / "scripts" / "yomiyasu_lint.py"
-SESSION_ROOT = Path(os.environ.get("YOMIYASU_SESSION_DIR", "/tmp/yomiyasu-mcp"))
+SESSION_ROOT = Path(os.environ.get("YOMIYASU_SESSION_DIR", "/tmp/yomiyasu-web-gate"))
 SESSION_ROOT.mkdir(parents=True, exist_ok=True)
-MAX_TEXT = 300_000
-MAX_OUTPUT = 80_000
+MAX_TEXT_BYTES = 1_500_000
+MAX_CHUNK_BYTES = 4096
+MAX_OUTPUT = 120_000
 SESSION_TTL = 6 * 60 * 60
 PATH_SECRET = os.environ.get("MCP_PATH_SECRET", "").strip("/")
-MCP_PATH = f"/{PATH_SECRET}/mcp" if PATH_SECRET else "/mcp"
-
-TOOLS = [
-    {
-        "name": "yomiyasu_lint",
-        "description": "Run nanaism/yomiyasu v2.5.0 yomiyasu_lint.py against a Japanese final-text candidate. Also scan literal user-specific forbidden strings.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "doc_type": {"type": "string"},
-                "forbidden": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["text"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "yomiyasu_check",
-        "description": "Run nanaism/yomiyasu v2.5.0 yomiyasu_check.py run on source and final text. Returns a session_id for a later exact-final verification. Also scans literal user-specific forbidden strings.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "source": {"type": "string"},
-                "final": {"type": "string"},
-                "material": {"type": "string"},
-                "doc_type": {"type": "string"},
-                "forbidden": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["source", "final"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "yomiyasu_verify",
-        "description": "Verify that the exact final text still matches the text inspected by yomiyasu_check, using both the upstream verify command and an independent SHA-256 check. Call immediately before emitting the answer.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "session_id": {"type": "string"},
-                "final": {"type": "string"},
-            },
-            "required": ["session_id", "final"],
-            "additionalProperties": False,
-        },
-    },
-]
+GATE_PREFIX = f"/{PATH_SECRET}/gate" if PATH_SECRET else "/gate"
+VALID_KINDS = {"source", "final", "material", "forbidden", "verify"}
 
 
-def bounded(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{name} must be a string")
-    if len(value) > MAX_TEXT:
-        raise ValueError(f"{name} exceeds {MAX_TEXT} characters")
-    return value
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
-def normalize_forbidden(value: object) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError("forbidden must be an array")
-    out: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            raise ValueError("forbidden entries must be strings")
-        if item and item not in out:
-            out.append(item)
-    return out
+def decode_chunk(value: str) -> bytes:
+    if len(value) > 7000:
+        raise ValueError("encoded chunk is too large")
+    padding = "=" * ((4 - len(value) % 4) % 4)
+    try:
+        data = base64.urlsafe_b64decode((value + padding).encode("ascii"))
+    except Exception as exc:
+        raise ValueError("invalid base64url chunk") from exc
+    if len(data) > MAX_CHUNK_BYTES:
+        raise ValueError("decoded chunk is too large")
+    return data
+
+
+def validate_sid(sid: str) -> str:
+    if len(sid) != 32 or any(c not in "0123456789abcdef" for c in sid.lower()):
+        raise ValueError("invalid session id")
+    return sid.lower()
+
+
+def session_dir(sid: str) -> Path:
+    return SESSION_ROOT / validate_sid(sid)
+
+
+def cleanup_sessions() -> None:
+    now = time.time()
+    for child in SESSION_ROOT.iterdir():
+        try:
+            if child.is_dir() and now - child.stat().st_mtime > SESSION_TTL:
+                shutil.rmtree(child, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def chunk_dir(folder: Path, kind: str) -> Path:
+    if kind not in VALID_KINDS:
+        raise ValueError("invalid kind")
+    path = folder / "chunks" / kind
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_chunk(folder: Path, kind: str, seq: int, data: bytes) -> None:
+    if seq < 0 or seq > 99999:
+        raise ValueError("invalid sequence")
+    path = chunk_dir(folder, kind) / f"{seq:05d}.part"
+    path.write_bytes(data)
+
+
+def assemble(folder: Path, kind: str, required: bool = True) -> bytes | None:
+    directory = folder / "chunks" / kind
+    if not directory.exists():
+        if required:
+            raise ValueError(f"missing {kind}")
+        return None
+    parts = sorted(directory.glob("*.part"))
+    if not parts:
+        if required:
+            raise ValueError(f"missing {kind}")
+        return None
+    data = b"".join(p.read_bytes() for p in parts)
+    if len(data) > MAX_TEXT_BYTES:
+        raise ValueError(f"{kind} is too large")
+    return data
+
+
+def decode_text(data: bytes, name: str) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{name} is not utf-8") from exc
 
 
 def forbidden_hits(text: str, words: list[str]) -> list[dict]:
     hits: list[dict] = []
     for word in words:
+        if not isinstance(word, str) or not word:
+            continue
         start = 0
-        while word:
-            idx = text.find(word, start)
-            if idx < 0:
+        while True:
+            index = text.find(word, start)
+            if index < 0:
                 break
-            hits.append({"word": word, "offset": idx})
-            start = idx + len(word)
+            hits.append({"word": word, "offset": index})
+            start = index + len(word)
     return hits
-
-
-def sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def run_cmd(args: list[str], cwd: Path, timeout: int = 100) -> dict:
@@ -126,58 +134,43 @@ def run_cmd(args: list[str], cwd: Path, timeout: int = 100) -> dict:
     }
 
 
-def parse_json_output(text: str):
+def parse_json(text: str):
     try:
         return json.loads(text)
     except Exception:
         return None
 
 
-def cleanup_sessions() -> None:
-    now = time.time()
-    for child in SESSION_ROOT.iterdir():
-        try:
-            if child.is_dir() and now - child.stat().st_mtime > SESSION_TTL:
-                shutil.rmtree(child, ignore_errors=True)
-        except OSError:
-            pass
-
-
-def tool_lint(arguments: dict) -> dict:
-    text = bounded(arguments.get("text", ""), "text")
-    forbidden = normalize_forbidden(arguments.get("forbidden"))
-    with TemporaryDirectory(prefix="yomiyasu-lint-") as temp:
-        folder = Path(temp)
-        final_path = folder / "final.md"
-        final_path.write_text(text, encoding="utf-8")
-        cmd = [sys.executable, "-B", str(LINT), str(final_path), "--json"]
-        doc_type = arguments.get("doc_type")
-        if doc_type:
-            cmd.extend(["--doc-type", str(doc_type)])
-        result = run_cmd(cmd, folder)
-    parsed = parse_json_output(result["stdout"])
-    hits = forbidden_hits(text, forbidden)
-    return {
-        "status": "FAIL" if hits or result["returncode"] not in (0, 1) else "EXECUTED",
-        "upstream_returncode": result["returncode"],
-        "upstream": parsed if parsed is not None else result["stdout"],
-        "stderr": result["stderr"],
-        "forbidden_findings": hits,
-        "final_sha256": sha256_text(text),
-    }
-
-
-def tool_check(arguments: dict) -> dict:
+def new_session() -> dict:
     cleanup_sessions()
-    source = bounded(arguments.get("source", ""), "source")
-    final = bounded(arguments.get("final", ""), "final")
-    material_value = arguments.get("material")
-    material = bounded(material_value, "material") if material_value is not None else None
-    forbidden = normalize_forbidden(arguments.get("forbidden"))
-
-    session_id = uuid.uuid4().hex
-    folder = SESSION_ROOT / session_id
+    sid = uuid.uuid4().hex
+    folder = SESSION_ROOT / sid
     folder.mkdir(parents=True, exist_ok=False)
+    return {"status": "OK", "session_id": sid, "expires_in_seconds": SESSION_TTL}
+
+
+def check_session(sid: str, doc_type: str | None) -> dict:
+    cleanup_sessions()
+    folder = session_dir(sid)
+    if not folder.exists():
+        return {"status": "FAIL", "message": "session not found"}
+
+    source_bytes = assemble(folder, "source", required=True)
+    final_bytes = assemble(folder, "final", required=True)
+    material_bytes = assemble(folder, "material", required=False)
+    forbidden_bytes = assemble(folder, "forbidden", required=False)
+
+    source = decode_text(source_bytes or b"", "source")
+    final = decode_text(final_bytes or b"", "final")
+    material = decode_text(material_bytes, "material") if material_bytes is not None else None
+    forbidden: list[str] = []
+    if forbidden_bytes is not None:
+        raw = decode_text(forbidden_bytes, "forbidden")
+        parsed = json.loads(raw)
+        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+            raise ValueError("forbidden must decode to a JSON string array")
+        forbidden = parsed
+
     source_path = folder / "source.md"
     final_path = folder / "final.md"
     state_path = folder / "state"
@@ -201,63 +194,65 @@ def tool_check(arguments: dict) -> dict:
         material_path = folder / "material.md"
         material_path.write_text(material, encoding="utf-8")
         cmd.extend(["--material", str(material_path)])
-    doc_type = arguments.get("doc_type")
     if doc_type:
-        cmd.extend(["--doc-type", str(doc_type)])
+        cmd.extend(["--doc-type", doc_type])
 
     result = run_cmd(cmd, folder)
-    parsed = parse_json_output(result["stdout"])
+    upstream = parse_json(result["stdout"])
     hits = forbidden_hits(final, forbidden)
-    meta = {
-        "session_id": session_id,
-        "final_sha256": sha256_text(final),
-        "forbidden": forbidden,
-        "created_at": time.time(),
-    }
-    (folder / "mcp-state.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-
-    upstream_status = parsed.get("status") if isinstance(parsed, dict) else None
+    upstream_status = upstream.get("status") if isinstance(upstream, dict) else None
     status = "EXECUTED"
     if hits or result["returncode"] != 0 or upstream_status in {"partial", "not_run", "error"}:
         status = "FAIL"
 
+    metadata = {
+        "session_id": sid,
+        "checked_final_sha256": sha256_bytes(final_bytes or b""),
+        "created_at": time.time(),
+        "forbidden": forbidden,
+    }
+    (folder / "gate-state.json").write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+    verify_dir = folder / "chunks" / "verify"
+    if verify_dir.exists():
+        shutil.rmtree(verify_dir, ignore_errors=True)
+
     return {
         "status": status,
-        "session_id": session_id,
+        "session_id": sid,
         "upstream_returncode": result["returncode"],
-        "upstream": parsed if parsed is not None else result["stdout"],
+        "upstream": upstream if upstream is not None else result["stdout"],
         "stderr": result["stderr"],
         "forbidden_findings": hits,
-        "final_sha256": meta["final_sha256"],
-        "instruction": "If the final text changes, call yomiyasu_check again. If it does not change, call yomiyasu_verify immediately before emission.",
+        "final_sha256": metadata["checked_final_sha256"],
+        "instruction": "If the final text changes, create a new session and run check again. Otherwise upload the exact outgoing text as kind=verify, then call verify.",
     }
 
 
-def tool_verify(arguments: dict) -> dict:
+def verify_session(sid: str) -> dict:
     cleanup_sessions()
-    session_id = arguments.get("session_id")
-    if not isinstance(session_id, str) or not session_id or any(c not in "0123456789abcdef" for c in session_id.lower()):
-        raise ValueError("invalid session_id")
-    final = bounded(arguments.get("final", ""), "final")
-    folder = SESSION_ROOT / session_id
-    meta_path = folder / "mcp-state.json"
-    final_path = folder / "final.md"
-    state_path = folder / "state"
-    if not meta_path.exists() or not final_path.exists():
-        return {"status": "FAIL", "message": "inspection session not found; rerun yomiyasu_check"}
+    folder = session_dir(sid)
+    metadata_path = folder / "gate-state.json"
+    if not folder.exists() or not metadata_path.exists():
+        return {"status": "FAIL", "message": "checked session not found"}
 
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    actual_hash = sha256_text(final)
-    if actual_hash != meta.get("final_sha256"):
+    checked_final = assemble(folder, "final", required=True) or b""
+    verify_bytes = assemble(folder, "verify", required=True) or b""
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    checked_hash = sha256_bytes(checked_final)
+    verify_hash = sha256_bytes(verify_bytes)
+    if checked_hash != metadata.get("checked_final_sha256") or verify_bytes != checked_final:
         return {
             "status": "FAIL",
-            "message": "final text changed after yomiyasu_check; rerun yomiyasu_check",
-            "expected_sha256": meta.get("final_sha256"),
-            "actual_sha256": actual_hash,
+            "message": "outgoing text differs from the checked final; run a new check",
+            "checked_sha256": checked_hash,
+            "outgoing_sha256": verify_hash,
         }
 
-    final_path.write_text(final, encoding="utf-8")
-    cmd = [
+    final_path = folder / "final.md"
+    final_path.write_bytes(verify_bytes)
+    state_path = folder / "state"
+    result = run_cmd([
         sys.executable,
         "-B",
         str(CHECK),
@@ -267,45 +262,24 @@ def tool_verify(arguments: dict) -> dict:
         "--state-dir",
         str(state_path),
         "--json",
-    ]
-    result = run_cmd(cmd, folder)
-    parsed = parse_json_output(result["stdout"])
-    upstream_status = parsed.get("status") if isinstance(parsed, dict) else None
-    ok = result["returncode"] == 0 and upstream_status not in {"no_record", "final_changed", "tool_changed", "partial", "not_run", "error"}
+    ], folder)
+    upstream = parse_json(result["stdout"])
+    upstream_status = upstream.get("status") if isinstance(upstream, dict) else None
+    ok = result["returncode"] == 0 and upstream_status not in {
+        "no_record", "final_changed", "tool_changed", "partial", "not_run", "error"
+    }
     return {
         "status": "PASS" if ok else "FAIL",
-        "message": "exact inspected final text verified" if ok else "upstream verification did not complete; rerun yomiyasu_check",
+        "message": "exact outgoing text verified" if ok else "upstream verify did not complete; run a new check",
         "upstream_returncode": result["returncode"],
-        "upstream": parsed if parsed is not None else result["stdout"],
+        "upstream": upstream if upstream is not None else result["stdout"],
         "stderr": result["stderr"],
-        "final_sha256": actual_hash,
+        "final_sha256": verify_hash,
     }
 
 
-def call_tool(name: str, arguments: dict) -> dict:
-    if name == "yomiyasu_lint":
-        return tool_lint(arguments)
-    if name == "yomiyasu_check":
-        return tool_check(arguments)
-    if name == "yomiyasu_verify":
-        return tool_verify(arguments)
-    raise ValueError(f"unknown tool: {name}")
-
-
-class TemporaryDirectory:
-    def __init__(self, prefix: str):
-        import tempfile
-        self._inner = tempfile.TemporaryDirectory(prefix=prefix)
-
-    def __enter__(self):
-        return self._inner.__enter__()
-
-    def __exit__(self, exc_type, exc, tb):
-        return self._inner.__exit__(exc_type, exc, tb)
-
-
 class Handler(BaseHTTPRequestHandler):
-    server_version = "yomiyasu-mcp/0.1"
+    server_version = "yomiyasu-web-gate/0.2"
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -316,82 +290,64 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.end_headers()
         self.wfile.write(raw)
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
-        path = urlparse(self.path).path
-        if path == "/":
-            self.send_json(200, {"name": "yomiyasu-mcp", "status": "ok", "upstream": "nanaism/yomiyasu v2.5.0"})
-            return
-        if path == MCP_PATH:
-            self.send_json(405, {"error": "use POST for MCP JSON-RPC"})
-            return
-        self.send_json(404, {"error": "not found"})
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path.rstrip("/")
+        query = parse_qs(parsed_url.query, keep_blank_values=True)
+        try:
+            if path == "":
+                self.send_json(200, {"name": "yomiyasu-web-gate", "status": "ok", "upstream": "nanaism/yomiyasu v2.5.0"})
+                return
+            if path == f"{GATE_PREFIX}/new":
+                self.send_json(200, new_session())
+                return
+            if path == f"{GATE_PREFIX}/put":
+                sid = validate_sid(query.get("sid", [""])[0])
+                kind = query.get("kind", [""])[0]
+                seq = int(query.get("seq", ["-1"])[0])
+                encoded = query.get("data", [""])[0]
+                folder = session_dir(sid)
+                if not folder.exists():
+                    self.send_json(404, {"status": "FAIL", "message": "session not found"})
+                    return
+                data = decode_chunk(encoded)
+                write_chunk(folder, kind, seq, data)
+                self.send_json(200, {"status": "OK", "session_id": sid, "kind": kind, "seq": seq, "bytes": len(data)})
+                return
+            if path == f"{GATE_PREFIX}/check":
+                sid = validate_sid(query.get("sid", [""])[0])
+                doc_type = query.get("doc_type", [None])[0]
+                self.send_json(200, check_session(sid, doc_type))
+                return
+            if path == f"{GATE_PREFIX}/verify":
+                sid = validate_sid(query.get("sid", [""])[0])
+                self.send_json(200, verify_session(sid))
+                return
+            self.send_json(404, {"status": "FAIL", "message": "not found"})
+        except subprocess.TimeoutExpired:
+            self.send_json(504, {"status": "FAIL", "message": "yomiyasu inspection timed out"})
+        except Exception as exc:
+            self.send_json(400, {"status": "FAIL", "message": f"{type(exc).__name__}: {exc}"})
 
     def do_POST(self):
-        if urlparse(self.path).path != MCP_PATH:
-            self.send_json(404, {"error": "not found"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 2_000_000:
-                raise ValueError("invalid request size")
-            body = json.loads(self.rfile.read(length).decode("utf-8"))
-            if isinstance(body, list):
-                responses = [self.handle_rpc(item) for item in body if isinstance(item, dict) and "id" in item]
-                self.send_json(200, responses)
-                return
-            if not isinstance(body, dict):
-                raise ValueError("JSON-RPC object required")
-            if "id" not in body:
-                self.send_response(202)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            self.send_json(200, self.handle_rpc(body))
-        except Exception as exc:
-            self.send_json(400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": f"{type(exc).__name__}: {exc}"}})
-
-    def handle_rpc(self, request: dict) -> dict:
-        rid = request.get("id")
-        method = request.get("method")
-        params = request.get("params") or {}
-        try:
-            if method == "initialize":
-                protocol = params.get("protocolVersion") or "2025-06-18"
-                result = {
-                    "protocolVersion": protocol,
-                    "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "yomiyasu-mcp", "version": "0.1.0"},
-                }
-            elif method == "ping":
-                result = {}
-            elif method == "tools/list":
-                result = {"tools": TOOLS}
-            elif method == "tools/call":
-                payload = call_tool(params.get("name"), params.get("arguments") or {})
-                result = {
-                    "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
-                    "isError": payload.get("status") == "ERROR",
-                }
-            else:
-                return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"Method not found: {method}"}}
-            return {"jsonrpc": "2.0", "id": rid, "result": result}
-        except subprocess.TimeoutExpired:
-            payload = {"status": "ERROR", "message": "yomiyasu inspection timed out"}
-            return {"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}], "isError": True}}
-        except Exception as exc:
-            payload = {"status": "ERROR", "message": f"{type(exc).__name__}: {exc}"}
-            return {"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}], "isError": True}}
+        self.send_json(405, {"status": "FAIL", "message": "POST is disabled; use the chunked GET gate"})
 
 
 def main() -> None:
-    if not CHECK.exists() or not LINT.exists():
+    if not CHECK.exists():
         raise SystemExit("upstream yomiyasu v2.5.0 is missing; run the Render build command")
     port = int(os.environ.get("PORT", "10000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"yomiyasu MCP listening on :{port}{MCP_PATH}", flush=True)
+    print(f"yomiyasu web gate listening on :{port}{GATE_PREFIX}", flush=True)
     server.serve_forever()
 
 
