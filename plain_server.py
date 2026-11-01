@@ -9,16 +9,16 @@ import server
 
 
 class PlainHandler(server.Handler):
-    server_version = "yomiyasu-mobile-gate/0.2"
+    server_version = "yomiyasu-mobile-gate/0.3"
 
     def send_json(self, status: int, payload: object):
         body = json.dumps(payload, ensure_ascii=False)
         page = (
             "<!doctype html><html><head><meta charset='utf-8'>"
             "<meta name='robots' content='noindex,nofollow'><title>yomiyasu gate</title>"
-            "</head><body><main><pre id='payload'>"
+            "</head><body><main><h1>Yomiyasu gate result</h1><p id='payload'>"
             + html.escape(body)
-            + "</pre></main></body></html>"
+            + "</p></main></body></html>"
         ).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
