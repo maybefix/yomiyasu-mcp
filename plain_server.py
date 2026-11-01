@@ -1,25 +1,32 @@
 from __future__ import annotations
 
+import html
 import json
 import os
-import sys
 from http.server import ThreadingHTTPServer
 
 import server
 
 
 class PlainHandler(server.Handler):
-    server_version = "yomiyasu-mobile-gate/0.1"
+    server_version = "yomiyasu-mobile-gate/0.2"
 
     def send_json(self, status: int, payload: object):
-        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False)
+        page = (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            "<meta name='robots' content='noindex,nofollow'><title>yomiyasu gate</title>"
+            "</head><body><main><pre id='payload'>"
+            + html.escape(body)
+            + "</pre></main></body></html>"
+        ).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.end_headers()
-        self.wfile.write(raw)
+        self.wfile.write(page)
 
 
 def main() -> None:
