@@ -11,7 +11,7 @@ import httpx
 import trafilatura
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("Chat Research Gate", stateless_http=True, json_response=True)
+mcp = FastMCP("Chat Research Gate", host="0.0.0.0", stateless_http=True, json_response=True)
 
 
 def allowed(url):
@@ -206,4 +206,4 @@ def gate_status() -> str:
                        ensure_ascii=False)
 
 
-app = mcp.streamable_http_app(host="0.0.0.0")
+app = mcp.streamable_http_app()
