@@ -102,7 +102,7 @@ def topic_terms(topic):
     ascii_terms = [x for x in ascii_terms if x not in stop and len(x)>=3]
     # Domain-specific Japanese terms are more useful than whole Japanese sentences.
     jp_terms = [x for x in ("リリースノート", "公式", "バージョン", "仕様", "ソースコード",
-                "ドキュメント", "実装", "不具合", "原因", "価格", "発売", "設定", "制限",
+                "ドキュメント", "実装", "不具合", "原因", "価格", "発売", "設定", "制限", "プラグイン",
                 "選手", "大会", "試合", "結果", "選考", "評価", "比較") if x in topic]
     jp_terms = [x for x in jp_terms if x not in ("公式","原因","結果","比較","評価","設定","制限")]
     if not ascii_terms and not jp_terms:
@@ -116,7 +116,7 @@ def search_query(topic, iteration):
     translate = {"リリースノート":"release notes", "仕様":"specification",
                  "ドキュメント":"documentation", "ソースコード":"source code",
                  "実装":"implementation", "不具合":"bug issue",
-                 "価格":"pricing", "発売":"release", "大会":"tournament"}
+                 "価格":"pricing", "発売":"release", "大会":"tournament", "プラグイン":"plugins"}
     if iteration == 0:
         return topic[:165]
     if iteration == 1:
@@ -146,6 +146,8 @@ def relevant(topic, title, url, page):
         if any(x not in head and x not in body for x in entities[1:4]):
             return False,0
     if versions and not all(x in head for x in versions):
+        return False,0
+    if "プラグイン" in jp and not re.search(r"\\bplugins?\\b",head):
         return False,0
     if not entities and not versions and jp and not any(x in head for x in jp):
         return False,0
