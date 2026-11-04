@@ -255,11 +255,30 @@ async def get_chat_research(request: Request):
             INFLIGHT.pop(question, None)
         return JSONResponse({"status": "error", "error": type(exc).__name__ + ": " + str(exc)[:200]}, status_code=500)
 
+async def search_probe(request: Request):
+    """Temporary engine comparison to select a usable free search backend."""
+    from ddgs import DDGS
+    query = request.query_params.get("q", "Python 3.12 release notes")[:120]
+    def probe(backend):
+        try:
+            with DDGS(timeout=6) as client:
+                items = list(client.text(query, backend=backend, region="us-en", max_results=5))
+            return {"engine": backend, "count": len(items),
+                    "titles": [(x.get("title") or "")[:100] for x in items[:3]],
+                    "urls": [(x.get("href") or x.get("url") or "")[:160] for x in items[:3]]}
+        except Exception as e:
+            return {"engine": backend, "error": type(e).__name__ + ": " + str(e)[:140]}
+    engines = ["google", "yahoo", "startpage", "bing", "duckduckgo", "wikipedia"]
+    results = await asyncio.gather(*(asyncio.to_thread(probe, name) for name in engines))
+    return JSONResponse({"q":query,"engines":results},headers={"Cache-Control":"no-store"})
+
+
 def mount_mobile(app):
     app.router.routes.extend([
         Route("/",homepage,methods=["GET"]),
         Route("/healthz",health,methods=["GET"]),
         Route("/api/research",start_research,methods=["POST"]),
         Route("/api/chat-research",get_chat_research,methods=["GET"]),
+        Route("/api/search-probe",search_probe,methods=["GET"]),
         Route("/api/research/{job_id}",get_research,methods=["GET"])
     ])
