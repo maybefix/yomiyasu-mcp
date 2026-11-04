@@ -189,7 +189,7 @@ def research_to_evidence(question: str, topics: list[str] | None = None,
             query = search_query(topic, turn)
             try:
                 with DDGS(timeout=7) as engine:
-                    results = list(engine.text(query, region="jp-jp", max_results=8))
+                    results = list(engine.text(query, region="wt-wt" if turn else "jp-jp", max_results=12))
             except Exception as exc:
                 issues.append("検索失敗: " + type(exc).__name__)
                 continue
