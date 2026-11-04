@@ -207,3 +207,7 @@ def gate_status() -> str:
 
 
 app = mcp.streamable_http_app()
+
+# Mount iPhone-responsive web interface alongside the existing MCP endpoint.
+from research_gate_mobile import mount_mobile
+mount_mobile(app)
