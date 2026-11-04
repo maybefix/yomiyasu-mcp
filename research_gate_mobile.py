@@ -257,33 +257,6 @@ async def get_chat_research(request: Request):
 
 
 
-async def provider_probe(request: Request):
-    """Temporary narrow probe to diagnose keyless search APIs."""
-    import httpx
-    endpoints=[
-        ("mwmbl","https://api.mwmbl.org/api/v2/search/"),
-        ("purili","https://puri.li/api/search"),
-    ]
-    def probe(entry):
-        name, url=entry
-        try:
-            with httpx.Client(timeout=9, follow_redirects=True,
-                    headers={"Accept":"application/json","User-Agent":"ChatResearchGate/0.3"}) as client:
-                res=client.get(url,params={"q":"Python 3.12 release notes"})
-            out={"name":name,"status":res.status_code,"endpoint":str(res.url),
-                 "type":res.headers.get("content-type")}
-            try:
-                payload=res.json()
-                found=payload.get("results",[]) if isinstance(payload,dict) else []
-                out.update({"count":len(found),"first":[{"title":x.get("title","")[:120],"url":x.get("url","")[:150]} for x in found[:3]]})
-            except ValueError:
-                out["response"]=res.text[:100]
-            return out
-        except Exception as exc:
-            return {"name":name,"error":type(exc).__name__+":"+str(exc)[:160]}
-    result=await asyncio.gather(*(asyncio.to_thread(probe,e) for e in endpoints))
-    return JSONResponse({"api_tests":result})
-
 
 def mount_mobile(app):
     app.router.routes.extend([
@@ -291,6 +264,5 @@ def mount_mobile(app):
         Route("/healthz",health,methods=["GET"]),
         Route("/api/research",start_research,methods=["POST"]),
         Route("/api/chat-research",get_chat_research,methods=["GET"]),
-        Route("/api/provider-probe",provider_probe,methods=["GET"]),
         Route("/api/research/{job_id}",get_research,methods=["GET"])
     ])
