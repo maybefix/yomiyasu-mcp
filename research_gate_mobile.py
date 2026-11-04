@@ -256,21 +256,29 @@ async def get_chat_research(request: Request):
         return JSONResponse({"status": "error", "error": type(exc).__name__ + ": " + str(exc)[:200]}, status_code=500)
 
 async def search_probe(request: Request):
-    """Temporary engine comparison to select a usable free search backend."""
-    from ddgs import DDGS
+    """Temporary test for public metasearch reachability."""
+    from urllib.parse import urlencode
+    import httpx
+    from lxml import html as lh
     query = request.query_params.get("q", "Python 3.12 release notes")[:120]
-    def probe(backend):
+    hosts = ["https://searx.tiekoetter.com", "https://search.serpensin.com", "https://www.bing.com"]
+    def probe(base):
         try:
-            with DDGS(timeout=6) as client:
-                items = list(client.text(query, backend=backend, region="us-en", max_results=5))
-            return {"engine": backend, "count": len(items),
-                    "titles": [(x.get("title") or "")[:100] for x in items[:3]],
-                    "urls": [(x.get("href") or x.get("url") or "")[:160] for x in items[:3]]}
+            if base.endswith("bing.com"):
+                url=base+"/search?"+urlencode({"q":query,"format":"rss"})
+            else:
+                url=base+"/search?"+urlencode({"q":query})
+            with httpx.Client(timeout=12,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 (compatible; ResearchGate/0.2)"}) as client:
+                r=client.get(url)
+            doc=lh.fromstring(r.text)
+            links=[(el.text_content().strip()[:90],el.get("href")) for el in doc.xpath("//article[contains(@class,'result')]//h3/a")[:6]]
+            return {"provider":base,"status":r.status_code,"size":len(r.content),"title":doc.xpath("//title/text()")[:1],
+                    "links":links, "first":r.text[:220]}
         except Exception as e:
-            return {"engine": backend, "error": type(e).__name__ + ": " + str(e)[:140]}
-    engines = ["google", "yahoo", "startpage", "bing", "duckduckgo", "wikipedia"]
-    results = await asyncio.gather(*(asyncio.to_thread(probe, name) for name in engines))
-    return JSONResponse({"q":query,"engines":results},headers={"Cache-Control":"no-store"})
+            return {"provider":base,"error":type(e).__name__+": "+str(e)[:200]}
+    result=await asyncio.gather(*(asyncio.to_thread(probe,url) for url in hosts))
+    return JSONResponse({"q":query,"results":result},headers={"Cache-Control":"no-store"})
+
 
 
 def mount_mobile(app):
