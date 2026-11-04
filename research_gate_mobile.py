@@ -256,11 +256,47 @@ async def get_chat_research(request: Request):
         return JSONResponse({"status": "error", "error": type(exc).__name__ + ": " + str(exc)[:200]}, status_code=500)
 
 
+
+async def provider_probe(request: Request):
+    """Single hard-coded public test; removed after diagnosis."""
+    import httpx
+    from urllib.parse import urlencode
+    q="Python 3.12 release notes"
+    bases={
+       "google":"https://www.google.com/search",
+       "bing":"https://www.bing.com/search",
+       "yahoo":"https://search.yahoo.com/search",
+       "ddg_lite":"https://lite.duckduckgo.com/lite/",
+       "ddg_html":"https://html.duckduckgo.com/html/",
+       "mojeek":"https://www.mojeek.com/search",
+       "ecosia":"https://www.ecosia.org/search",
+       "brave":"https://search.brave.com/search",
+       "yandex":"https://yandex.com/search/",
+       "qwant":"https://www.qwant.com/",
+       "mwmbl":"https://api.mwmbl.org/api/v1/search/",
+       "searx":"https://search.banke.cloud/search",
+    }
+    def check(entry):
+        name, base=entry
+        try:
+            with httpx.Client(timeout=11,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17 Mobile/15E148 Safari/604.1","Accept-Language":"en-US,en;q=0.9"}) as client:
+                res=client.get(base,params={"p" if name=="yahoo" else "q":q})
+            from lxml import html as lhtml
+            tree=lhtml.fromstring(res.text)
+            title=tree.xpath("//title/text()")[:1]
+            a=[(x.text_content() or "").strip()[:64] for x in tree.xpath("//a") if "3.12" in (x.text_content() or "")][:3]
+            return {"name":name,"status":res.status_code,"bytes":len(res.content),"title":title,"matches":a,"preview":res.text[:160]}
+        except Exception as e:
+            return {"name":name,"error":type(e).__name__+":"+str(e)[:100]}
+    results=await asyncio.gather(*(asyncio.to_thread(check,item) for item in bases.items()))
+    return JSONResponse({"results":results})
+
 def mount_mobile(app):
     app.router.routes.extend([
         Route("/",homepage,methods=["GET"]),
         Route("/healthz",health,methods=["GET"]),
         Route("/api/research",start_research,methods=["POST"]),
         Route("/api/chat-research",get_chat_research,methods=["GET"]),
+        Route("/api/provider-probe",provider_probe,methods=["GET"]),
         Route("/api/research/{job_id}",get_research,methods=["GET"])
     ])
