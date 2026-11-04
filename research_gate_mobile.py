@@ -14,6 +14,8 @@ from starlette.routing import Route
 POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="research")
 JOBS = {}
 RATE = {}
+QUERY_CACHE = {}
+INFLIGHT = {}
 LOCK = Lock()
 MAX_AGE = 3600
 
@@ -227,15 +229,30 @@ async def get_chat_research(request: Request):
     if not 1 <= len(question) <= 900:
         return JSONResponse({"error": "qは1～900文字で指定してください"}, status_code=400)
     from research_gate_app import research_to_evidence
+    now = time.time()
+    with LOCK:
+        cached = QUERY_CACHE.get(question)
+        if cached and now - cached["time"] < 900:
+            return JSONResponse(cached["data"], headers={"Cache-Control": "no-store"})
+        future = INFLIGHT.get(question)
+        if future is None:
+            future = POOL.submit(research_to_evidence, question, None, 3, 2)
+            INFLIGHT[question] = future
     try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(research_to_evidence, question, None, 3, 2),
-            timeout=80,
-        )
-        return JSONResponse(json.loads(result), headers={"Cache-Control": "no-store"})
+        result = await asyncio.wait_for(asyncio.wrap_future(future), timeout=75)
+        parsed = json.loads(result)
+        with LOCK:
+            QUERY_CACHE[question] = {"time": time.time(), "data": parsed}
+            INFLIGHT.pop(question, None)
+            if len(QUERY_CACHE) > 50:
+                oldest = min(QUERY_CACHE, key=lambda key: QUERY_CACHE[key]["time"])
+                QUERY_CACHE.pop(oldest, None)
+        return JSONResponse(parsed, headers={"Cache-Control": "no-store"})
     except asyncio.TimeoutError:
         return JSONResponse({"status": "timeout", "error": "検索時間が上限に達しました", "question": question}, status_code=504)
     except Exception as exc:
+        with LOCK:
+            INFLIGHT.pop(question, None)
         return JSONResponse({"status": "error", "error": type(exc).__name__ + ": " + str(exc)[:200]}, status_code=500)
 
 def mount_mobile(app):
