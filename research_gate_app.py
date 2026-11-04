@@ -167,6 +167,53 @@ def excerpt(topic, text):
     return text[max(0, position-80): min(len(text), position+380)].strip()
 
 
+def independent_search(query):
+    """Search independent keyless indexes without depending on rate-limited SERP scraping."""
+    results=[]
+    problems=[]
+    sources=[
+        ("mwmbl","https://api.mwmbl.org/api/v2/search/"),
+        ("purili","https://puri.li/api/search"),
+    ]
+    for name,endpoint in sources:
+        try:
+            with httpx.Client(timeout=9,headers={"Accept":"application/json","User-Agent":"ChatResearchGate/0.3"}) as client:
+                response=client.get(endpoint,params={"q":query})
+                response.raise_for_status()
+                data=response.json()
+            matches=data.get("results",[]) if isinstance(data,dict) else []
+            for item in matches[:20]:
+                url=item.get("url") or ""
+                if not allowed(url):
+                    continue
+                results.append({"href":url,"title":item.get("title") or url,
+                                "snippet":item.get("description") or item.get("content") or "",
+                                "provider":name})
+            if len(results)>=5:
+                break
+        except (httpx.HTTPError,ValueError) as exc:
+            problems.append(name+":"+type(exc).__name__)
+    return results,problems
+
+
+def indexed_text(url):
+    """Use explicitly stored extracted passages if the live page is unavailable."""
+    if not allowed(url):
+        return ""
+    try:
+        with httpx.Client(timeout=7,headers={"Accept":"application/json"}) as client:
+            response=client.get("https://puri.li/api/context",params={"url":url})
+            response.raise_for_status()
+            data=response.json()
+        if data.get("coverage") != "stored-extracted-passages":
+            return ""
+        content=data.get("content") or ""
+        return content[:40000] if len(content)>100 else ""
+    except (ValueError,httpx.HTTPError):
+        return ""
+
+
+
 @mcp.tool()
 def research_to_evidence(question: str, topics: list[str] | None = None,
                          rounds: int = 3, minimum_sources: int = 2) -> str:
@@ -187,11 +234,11 @@ def research_to_evidence(question: str, topics: list[str] | None = None,
             if len(records[topic]) >= minimum_sources:
                 continue
             query = search_query(topic, turn)
-            try:
-                with DDGS(timeout=7) as engine:
-                    results = list(engine.text(query, region="wt-wt" if turn else "jp-jp", backend="yahoo", max_results=12))
-            except Exception as exc:
-                issues.append("検索失敗: " + type(exc).__name__)
+            results, problems = independent_search(query)
+            if problems:
+                issues.extend(problems)
+            if not results:
+                issues.append("無料検索インデックスから候補を取得できませんでした: "+query[:80])
                 continue
             # Fetch candidates that mention a core term in their title/URL first.
             english, jp = topic_terms(topic)
@@ -211,6 +258,10 @@ def research_to_evidence(question: str, topics: list[str] | None = None,
                 if core and not any(x in (title + " " + url).lower() for x in core):
                     continue
                 page = retrieve(url)
+                source_method = "live"
+                if len(page) < 80:
+                    page = indexed_text(url)
+                    source_method = "stored-index"
                 if len(page) < 80:
                     continue
                 is_relevant, score = relevant(topic, title, url, page)
@@ -223,7 +274,8 @@ def research_to_evidence(question: str, topics: list[str] | None = None,
                 records[topic].append({"id": "E" + str(all_count),
                                        "title": title, "url": url,
                                        "quote": quote, "quote_verified": True,
-                                       "relevance_checked": True, "relevance_score": score})
+                                       "relevance_checked": True, "relevance_score": score,
+                                       "source_method": source_method, "provider":item.get("provider","unknown")})
         completed = sum(len(records[t]) >= minimum_sources for t in topics)
         if 100 * completed / len(topics) >= 95:
             break
@@ -238,7 +290,7 @@ def research_to_evidence(question: str, topics: list[str] | None = None,
                      " | " + row["status"] + " | " + (links or "なし") + " |")
     return json.dumps({"status": "ready" if coverage >= 95 else "incomplete",
                        "question": question, "retrieval_coverage_percent": coverage,
-                       "relevance_filter": "v0.2.2; official names and versions must match",
+                       "relevance_filter": "v0.3.1; source content and named entities must match",
                        "coverage_definition": "各論点について別URLの本文引用を必要件数だけ取得した割合。結論の正答確率ではない。",
                        "rounds_executed": turn+1,
                        "topics": results,
@@ -284,7 +336,7 @@ def verify_conclusions(research_json: str, conclusions_json: str) -> str:
 @mcp.tool()
 def gate_status() -> str:
     """Inspect availability of the no-paid-API research gate."""
-    return json.dumps({"status": "available", "version": "0.2.2",
+    return json.dumps({"status": "available", "version": "0.3.1",
                        "tools": ["research_to_evidence", "verify_conclusions"],
                        "search": "ddgs", "paid_api_required": False},
                        ensure_ascii=False)
