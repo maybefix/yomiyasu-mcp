@@ -147,7 +147,7 @@ def relevant(topic, title, url, page):
             return False,0
     if versions and not all(x in head for x in versions):
         return False,0
-    if "プラグイン" in jp and not re.search(r"\\bplugins?\\b",head):
+    if "プラグイン" in jp and not re.search(r"\bplugins?\b",head):
         return False,0
     if not entities and not versions and jp and not any(x in head for x in jp):
         return False,0
