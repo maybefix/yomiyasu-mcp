@@ -258,40 +258,32 @@ async def get_chat_research(request: Request):
 
 
 async def provider_probe(request: Request):
-    """Single hard-coded public test; removed after diagnosis."""
+    """Temporary narrow probe to diagnose keyless search APIs."""
     import httpx
-    from urllib.parse import urlencode
-    q="Python 3.12 release notes"
-    bases={
-       "purili":"https://puri.li/api/search",
-       "mwmbl":"https://api.mwmbl.org/api/v2/search/",
-       "google":"https://www.google.com/search",
-       "bing":"https://www.bing.com/search",
-       "yahoo":"https://search.yahoo.com/search",
-       "ddg_lite":"https://lite.duckduckgo.com/lite/",
-       "ddg_html":"https://html.duckduckgo.com/html/",
-       "mojeek":"https://www.mojeek.com/search",
-       "ecosia":"https://www.ecosia.org/search",
-       "brave":"https://search.brave.com/search",
-       "yandex":"https://yandex.com/search/",
-       "qwant":"https://www.qwant.com/",
-       "mwmbl":"https://api.mwmbl.org/api/v1/search/",
-       "searx":"https://search.banke.cloud/search",
-    }
-    def check(entry):
-        name, base=entry
+    endpoints=[
+        ("mwmbl","https://api.mwmbl.org/api/v2/search/"),
+        ("purili","https://puri.li/api/search"),
+    ]
+    def probe(entry):
+        name, url=entry
         try:
-            with httpx.Client(timeout=11,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17 Mobile/15E148 Safari/604.1","Accept-Language":"en-US,en;q=0.9"}) as client:
-                res=client.get(base,params={"p" if name=="yahoo" else "q":q})
-            from lxml import html as lhtml
-            tree=lhtml.fromstring(res.text)
-            title=tree.xpath("//title/text()")[:1]
-            a=[(x.text_content() or "").strip()[:64] for x in tree.xpath("//a") if "3.12" in (x.text_content() or "")][:3]
-            return {"name":name,"status":res.status_code,"bytes":len(res.content),"title":title,"matches":a,"preview":res.text[:160]}
-        except Exception as e:
-            return {"name":name,"error":type(e).__name__+":"+str(e)[:100]}
-    results=await asyncio.gather(*(asyncio.to_thread(check,item) for item in bases.items()))
-    return JSONResponse({"results":results})
+            with httpx.Client(timeout=9, follow_redirects=True,
+                    headers={"Accept":"application/json","User-Agent":"ChatResearchGate/0.3"}) as client:
+                res=client.get(url,params={"q":"Python 3.12 release notes"})
+            out={"name":name,"status":res.status_code,"endpoint":str(res.url),
+                 "type":res.headers.get("content-type")}
+            try:
+                payload=res.json()
+                found=payload.get("results",[]) if isinstance(payload,dict) else []
+                out.update({"count":len(found),"first":[{"title":x.get("title","")[:120],"url":x.get("url","")[:150]} for x in found[:3]]})
+            except ValueError:
+                out["response"]=res.text[:100]
+            return out
+        except Exception as exc:
+            return {"name":name,"error":type(exc).__name__+":"+str(exc)[:160]}
+    result=await asyncio.gather(*(asyncio.to_thread(probe,e) for e in endpoints))
+    return JSONResponse({"api_tests":result})
+
 
 def mount_mobile(app):
     app.router.routes.extend([
