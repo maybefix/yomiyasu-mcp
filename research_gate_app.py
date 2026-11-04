@@ -89,12 +89,76 @@ def subtopics(question, topics):
     return unique
 
 
+def topic_terms(topic):
+    """Extract useful terms, preserving software names and dotted versions."""
+    ascii_terms = [x.lower() for x in re.findall(r"[a-zA-Z][\w.+-]{2,}|\d+(?:\.\d+)+", topic)]
+    stop = {"the","what","which","where","when","how","why","and","for","are","can","does","with"}
+    ascii_terms = [x for x in ascii_terms if x not in stop and len(x)>=3]
+    # Domain-specific Japanese terms are more useful than whole Japanese sentences.
+    jp_terms = [x for x in ("リリースノート", "公式", "バージョン", "仕様", "ソースコード",
+                "ドキュメント", "実装", "不具合", "原因", "価格", "発売", "設定", "制限",
+                "選手", "大会", "試合", "結果", "選考", "評価", "比較") if x in topic]
+    jp_terms = [x for x in jp_terms if x not in ("公式","原因","結果","比較","評価","設定","制限")]
+    if not ascii_terms and not jp_terms:
+        chunks = re.findall(r"[一-龯々ァ-ヴー]{2,}",topic)
+        jp_terms = [x for x in chunks if x not in ("方法","質問","場合","確認","情報")][:4]
+    return list(dict.fromkeys(ascii_terms)), list(dict.fromkeys(jp_terms))
+
+
+def search_query(topic, iteration):
+    english, jp = topic_terms(topic)
+    translate = {"リリースノート":"release notes", "仕様":"specification",
+                 "ドキュメント":"documentation", "ソースコード":"source code",
+                 "実装":"implementation", "不具合":"bug issue",
+                 "価格":"pricing", "発売":"release", "大会":"tournament"}
+    if iteration == 0:
+        return topic[:165]
+    if iteration == 1:
+        base = " ".join(english + [translate.get(x,x) for x in jp])
+        return (base + (" official" if "公式" in topic else ""))[:170] or topic[:165]
+    return (" ".join(english + [translate.get(x,x) for x in jp]) + 
+            " site:docs.python.org" if "python" in english else 
+            topic[:120] + " 原資料 一次資料 詳細")[:170]
+
+
+def relevant(topic, title, url, page):
+    """Require core topic terms in the source, not only a successful HTTP response."""
+    english, jp = topic_terms(topic)
+    head = (title + " " + url).lower()
+    body = page.lower()
+    core = [x for x in english if x not in ("official","documentation")]
+    if core:
+        # Proper names and versions should appear in title or URL.
+        if not any(x in head for x in core):
+            return False, 0
+        if any(x not in head and x not in body for x in core):
+            return False, 0
+        if any(re.match(r"^\d+(?:\.\d+)+$",x) for x in core) and not any(
+                x in head for x in core if re.match(r"^\d+(?:\.\d+)+$",x)):
+            return False, 0
+    elif jp:
+        if not any(x in head for x in jp):
+            return False, 0
+    else:
+        return False, 0
+    hits = sum(4 for x in core if x in head) + sum(1 for x in core if x in body)
+    hits += sum(2 for x in jp if x in head) + sum(1 for x in jp if x in body)
+    if core and hits < 5:
+        return False, hits
+    if jp and not core and hits < 3:
+        return False, hits
+    return True, hits
+
+
 def excerpt(topic, text):
-    words = re.findall(r"[一-龯々ぁ-ゔァ-ヴー]{2,}|[a-zA-Z0-9_.-]{3,}", topic)
-    words = sorted(words, key=len, reverse=True)
+    english, jp = topic_terms(topic)
+    words = sorted(english + jp, key=len, reverse=True)
     lower = text.lower()
-    position = next((lower.find(w.lower()) for w in words if w.lower() in lower), 0)
-    return text[max(0, position-70): min(len(text), position+290)].strip()
+    positions = [lower.find(w.lower()) for w in words if w.lower() in lower]
+    if not positions:
+        return ""
+    position = min(positions)
+    return text[max(0, position-80): min(len(text), position+380)].strip()
 
 
 @mcp.tool()
@@ -116,31 +180,44 @@ def research_to_evidence(question: str, topics: list[str] | None = None,
         for topic in topics:
             if len(records[topic]) >= minimum_sources:
                 continue
-            query = topic[:165] + ["", " 公式 仕様 発表", " 反証 不具合 問題"][turn]
+            query = search_query(topic, turn)
             try:
                 with DDGS(timeout=7) as engine:
                     results = list(engine.text(query, region="jp-jp", max_results=8))
             except Exception as exc:
                 issues.append("検索失敗: " + type(exc).__name__)
                 continue
-            for item in results:
-                if len(records[topic]) >= minimum_sources or len(seen[topic]) >= 15:
+            # Fetch candidates that mention a core term in their title/URL first.
+            english, jp = topic_terms(topic)
+            candidates = sorted(results, key=lambda x: sum(
+                1 for token in english + jp if token.lower() in
+                ((x.get("title") or "") + " " + (x.get("href") or x.get("url") or "")).lower()
+            ), reverse=True)
+            for item in candidates:
+                if len(records[topic]) >= minimum_sources or len(seen[topic]) >= 28:
                     break
                 url = item.get("href") or item.get("url") or ""
+                title = (item.get("title") or url)[:180]
                 if not allowed(url) or url in seen[topic]:
                     continue
                 seen[topic].add(url)
+                core = [x for x in english if x not in ("official", "documentation")]
+                if core and not any(x in (title + " " + url).lower() for x in core):
+                    continue
                 page = retrieve(url)
                 if len(page) < 80:
+                    continue
+                is_relevant, score = relevant(topic, title, url, page)
+                if not is_relevant:
                     continue
                 quote = excerpt(topic, page)
                 if not quote or quote not in page:
                     continue
                 all_count += 1
                 records[topic].append({"id": "E" + str(all_count),
-                                       "title": (item.get("title") or url)[:180],
-                                       "url": url, "quote": quote,
-                                       "quote_verified": True})
+                                       "title": title, "url": url,
+                                       "quote": quote, "quote_verified": True,
+                                       "relevance_checked": True, "relevance_score": score})
         completed = sum(len(records[t]) >= minimum_sources for t in topics)
         if 100 * completed / len(topics) >= 95:
             break
@@ -155,6 +232,7 @@ def research_to_evidence(question: str, topics: list[str] | None = None,
                      " | " + row["status"] + " | " + (links or "なし") + " |")
     return json.dumps({"status": "ready" if coverage >= 95 else "incomplete",
                        "question": question, "retrieval_coverage_percent": coverage,
+                       "relevance_filter": "v0.2.2; official names and versions must match",
                        "coverage_definition": "各論点について別URLの本文引用を必要件数だけ取得した割合。結論の正答確率ではない。",
                        "rounds_executed": turn+1,
                        "topics": results,
@@ -200,7 +278,7 @@ def verify_conclusions(research_json: str, conclusions_json: str) -> str:
 @mcp.tool()
 def gate_status() -> str:
     """Inspect availability of the no-paid-API research gate."""
-    return json.dumps({"status": "available", "version": "0.1.0",
+    return json.dumps({"status": "available", "version": "0.2.2",
                        "tools": ["research_to_evidence", "verify_conclusions"],
                        "search": "ddgs", "paid_api_required": False},
                        ensure_ascii=False)
