@@ -263,6 +263,8 @@ async def provider_probe(request: Request):
     from urllib.parse import urlencode
     q="Python 3.12 release notes"
     bases={
+       "purili":"https://puri.li/api/search",
+       "mwmbl":"https://api.mwmbl.org/api/v2/search/",
        "google":"https://www.google.com/search",
        "bing":"https://www.bing.com/search",
        "yahoo":"https://search.yahoo.com/search",
