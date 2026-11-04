@@ -9,6 +9,7 @@ from urllib.parse import urljoin, urlsplit
 from ddgs import DDGS
 import httpx
 import trafilatura
+from lxml import html as lxml_html
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("Chat Research Gate", host="0.0.0.0", stateless_http=True, json_response=True)
@@ -61,8 +62,13 @@ def retrieve(url):
                 raw = b"".join(chunks).decode("utf-8", "replace")
                 if "text/plain" in content_type:
                     return raw[:40000]
-                return (trafilatura.extract(raw, include_tables=True) or
-                        html.unescape(re.sub(r"<[^>]+>", " ", raw)))[:40000]
+                extracted = trafilatura.extract(raw, include_tables=True)
+                if not extracted:
+                    tree = lxml_html.fromstring(raw)
+                    for element in tree.xpath("//script|//style|//nav|//footer|//noscript"):
+                        element.drop_tree()
+                    extracted = " ".join(tree.itertext())
+                return html.unescape(extracted)[:40000]
             except Exception:
                 return ""
     return ""
