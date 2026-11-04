@@ -261,7 +261,7 @@ async def search_probe(request: Request):
     import httpx
     from lxml import html as lh
     query = request.query_params.get("q", "Python 3.12 release notes")[:120]
-    hosts = ["https://searx.tiekoetter.com", "https://search.serpensin.com", "https://www.bing.com"]
+    hosts = ["https://search.rhscz.eu", "https://search.utilibre.org", "https://search.banke.cloud", "https://sx.xo.st", "https://searx.tiekoetter.com"]
     def probe(base):
         try:
             if base.endswith("bing.com"):
