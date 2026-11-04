@@ -220,10 +220,29 @@ async def get_research(request: Request):
     return JSONResponse(result,headers={"Cache-Control":"no-store"})
 
 
+
+async def get_chat_research(request: Request):
+    """Single GET for Chat-mode web readers: search first, return evidence after completion."""
+    question = request.query_params.get("q", "").strip()
+    if not 1 <= len(question) <= 900:
+        return JSONResponse({"error": "qは1～900文字で指定してください"}, status_code=400)
+    from research_gate_app import research_to_evidence
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(research_to_evidence, question, None, 3, 2),
+            timeout=80,
+        )
+        return JSONResponse(json.loads(result), headers={"Cache-Control": "no-store"})
+    except asyncio.TimeoutError:
+        return JSONResponse({"status": "timeout", "error": "検索時間が上限に達しました", "question": question}, status_code=504)
+    except Exception as exc:
+        return JSONResponse({"status": "error", "error": type(exc).__name__ + ": " + str(exc)[:200]}, status_code=500)
+
 def mount_mobile(app):
     app.router.routes.extend([
         Route("/",homepage,methods=["GET"]),
         Route("/healthz",health,methods=["GET"]),
         Route("/api/research",start_research,methods=["POST"]),
+        Route("/api/chat-research",get_chat_research,methods=["GET"]),
         Route("/api/research/{job_id}",get_research,methods=["GET"])
     ])
