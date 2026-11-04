@@ -128,32 +128,34 @@ def search_query(topic, iteration):
 
 
 def relevant(topic, title, url, page):
-    """Require core topic terms in the source, not only a successful HTTP response."""
+    """Reject cross-product version matches, such as CMake 3.12 for Python 3.12."""
     english, jp = topic_terms(topic)
-    head = (title + " " + url).lower()
-    body = page.lower()
-    core = [x for x in english if x not in ("official","documentation")]
-    if core:
-        # Proper names and versions should appear in title or URL.
-        if not any(x in head for x in core):
-            return False, 0
-        if any(x not in head and x not in body for x in core):
-            return False, 0
-        if any(re.match(r"^\d+(?:\.\d+)+$",x) for x in core) and not any(
-                x in head for x in core if re.match(r"^\d+(?:\.\d+)+$",x)):
-            return False, 0
-    elif jp:
-        if not any(x in head for x in jp):
-            return False, 0
-    else:
-        return False, 0
-    hits = sum(4 for x in core if x in head) + sum(1 for x in core if x in body)
-    hits += sum(2 for x in jp if x in head) + sum(1 for x in jp if x in body)
-    if core and hits < 5:
-        return False, hits
-    if jp and not core and hits < 3:
-        return False, hits
-    return True, hits
+    head=(title+" "+url).lower()
+    body=page.lower()
+    generic={"release","notes","note","official","documentation","docs","tutorial",
+             "guide","help","what","new","update","feature","features",
+             "issue","issues","problem","support","latest","version","versions",
+             "bug","bugs","with","from","the","how","for"}
+    versions=[x for x in english if re.fullmatch(r"\d+(?:\.\d+)+",x)]
+    entities=[x for x in english if x not in generic and x not in versions and not x.isdigit()]
+    if entities:
+        # The named product or subject must occur in the title or URL, not only an incidental paragraph.
+        if entities[0] not in head:
+            return False,0
+        # Extra names should be present in the title, URL, or full body.
+        if any(x not in head and x not in body for x in entities[1:4]):
+            return False,0
+    if versions and not all(x in head for x in versions):
+        return False,0
+    if not entities and not versions and jp and not any(x in head for x in jp):
+        return False,0
+    if not entities and not versions and not jp:
+        return False,0
+    hits=sum(5 for x in entities if x in head)
+    hits+=sum(5 for x in versions if x in head)
+    hits+=sum(1 for x in entities if x in body)
+    hits+=sum(2 for x in jp if x in head)+sum(1 for x in jp if x in body)
+    return hits>=3,hits
 
 
 def excerpt(topic, text):
