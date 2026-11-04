@@ -255,31 +255,6 @@ async def get_chat_research(request: Request):
             INFLIGHT.pop(question, None)
         return JSONResponse({"status": "error", "error": type(exc).__name__ + ": " + str(exc)[:200]}, status_code=500)
 
-async def search_probe(request: Request):
-    """Temporary test for public metasearch reachability."""
-    from urllib.parse import urlencode
-    import httpx
-    from lxml import html as lh
-    query = request.query_params.get("q", "Python 3.12 release notes")[:120]
-    hosts = ["https://search.rhscz.eu", "https://search.utilibre.org", "https://search.banke.cloud", "https://sx.xo.st", "https://searx.tiekoetter.com"]
-    def probe(base):
-        try:
-            if base.endswith("bing.com"):
-                url=base+"/search?"+urlencode({"q":query,"format":"rss"})
-            else:
-                url=base+"/search?"+urlencode({"q":query})
-            with httpx.Client(timeout=12,follow_redirects=True,headers={"User-Agent":"Mozilla/5.0 (compatible; ResearchGate/0.2)"}) as client:
-                r=client.get(url)
-            doc=lh.fromstring(r.text)
-            links=[(el.text_content().strip()[:90],el.get("href")) for el in doc.xpath("//article[contains(@class,'result')]//h3/a")[:6]]
-            return {"provider":base,"status":r.status_code,"size":len(r.content),"title":doc.xpath("//title/text()")[:1],
-                    "links":links, "first":r.text[:220]}
-        except Exception as e:
-            return {"provider":base,"error":type(e).__name__+": "+str(e)[:200]}
-    result=await asyncio.gather(*(asyncio.to_thread(probe,url) for url in hosts))
-    return JSONResponse({"q":query,"results":result},headers={"Cache-Control":"no-store"})
-
-
 
 def mount_mobile(app):
     app.router.routes.extend([
@@ -287,6 +262,5 @@ def mount_mobile(app):
         Route("/healthz",health,methods=["GET"]),
         Route("/api/research",start_research,methods=["POST"]),
         Route("/api/chat-research",get_chat_research,methods=["GET"]),
-        Route("/api/search-probe",search_probe,methods=["GET"]),
         Route("/api/research/{job_id}",get_research,methods=["GET"])
     ])
