@@ -26,6 +26,36 @@ PATH_SECRET = os.environ.get("MCP_PATH_SECRET", "").strip("/")
 GATE_PREFIX = f"/{PATH_SECRET}/gate" if PATH_SECRET else "/gate"
 VALID_KINDS = {"source", "final", "material", "forbidden", "verify"}
 
+UPSTREAM_TAG = "v3.1.0"
+UPSTREAM_COMMIT = "db78b9bc5e868549b517a037df7a4d1c93edac23"
+
+
+def ensure_upstream() -> None:
+    """Load the exact official v3.1.0 upstream before accepting requests."""
+    if not (UPSTREAM / ".git").is_dir():
+        raise SystemExit("upstream checkout is missing; verify Render build command")
+    current = subprocess.run(
+        ["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True, timeout=30,
+    ).stdout.strip()
+    if current != UPSTREAM_COMMIT:
+        subprocess.run(
+            ["git", "-C", str(UPSTREAM), "fetch", "--depth", "1", "origin",
+             f"refs/tags/{UPSTREAM_TAG}"],
+            check=True, timeout=120,
+        )
+        subprocess.run(
+            ["git", "-C", str(UPSTREAM), "checkout", "--force", "--detach", "FETCH_HEAD"],
+            check=True, timeout=60,
+        )
+    actual = subprocess.run(
+        ["git", "-C", str(UPSTREAM), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True, timeout=30,
+    ).stdout.strip()
+    if actual != UPSTREAM_COMMIT or not CHECK.is_file():
+        raise SystemExit(f"upstream revision mismatch: expected {UPSTREAM_COMMIT}, got {actual}")
+
+
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -305,7 +335,7 @@ class Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed_url.query, keep_blank_values=True)
         try:
             if path == "":
-                self.send_json(200, {"name": "yomiyasu-web-gate", "status": "ok", "upstream": "nanaism/yomiyasu v2.5.0"})
+                self.send_json(200, {"name": "yomiyasu-web-gate", "status": "ok", "upstream": f"nanaism/yomiyasu {UPSTREAM_TAG}"})
                 return
             if path == f"{GATE_PREFIX}/new":
                 self.send_json(200, new_session())
@@ -343,8 +373,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    if not CHECK.exists():
-        raise SystemExit("upstream yomiyasu v2.5.0 is missing; run the Render build command")
+    ensure_upstream()
     port = int(os.environ.get("PORT", "10000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"yomiyasu web gate listening on :{port}{GATE_PREFIX}", flush=True)

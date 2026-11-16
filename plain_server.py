@@ -30,8 +30,7 @@ class PlainHandler(server.Handler):
 
 
 def main() -> None:
-    if not server.CHECK.exists():
-        raise SystemExit("upstream yomiyasu v2.5.0 is missing; run the Render build command")
+    server.ensure_upstream()
     port = int(os.environ.get("PORT", "10000"))
     httpd = ThreadingHTTPServer(("0.0.0.0", port), PlainHandler)
     print(f"yomiyasu mobile gate listening on :{port}{server.GATE_PREFIX}", flush=True)
