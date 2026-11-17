@@ -20,8 +20,9 @@ jobs:
           mkdir -p /tmp/yomiyasu-smoke
           printf '検査の例文です。' >/tmp/yomiyasu-smoke/source.md
           cp /tmp/yomiyasu-smoke/source.md /tmp/yomiyasu-smoke/final.md
-          python -B upstream/scripts/yomiyasu_check.py run --source /tmp/yomiyasu-smoke/source.md --final /tmp/yomiyasu-smoke/final.md --state-dir /tmp/yomiyasu-smoke/state --json >/tmp/yomiyasu-smoke/run.json
-          python -B upstream/scripts/yomiyasu_check.py verify --final /tmp/yomiyasu-smoke/final.md --state-dir /tmp/yomiyasu-smoke/state --json >/tmp/yomiyasu-smoke/verify.json
+          cd /tmp/yomiyasu-smoke
+          python -B "$GITHUB_WORKSPACE/upstream/scripts/yomiyasu_check.py" run --source source.md --final final.md --state-dir state --json >run.json
+          python -B "$GITHUB_WORKSPACE/upstream/scripts/yomiyasu_check.py" verify --final final.md --state-dir state --json >verify.json
           cat /tmp/yomiyasu-smoke/verify.json
           python - <<'PY'
           import json
@@ -35,8 +36,8 @@ jobs:
           mkdir -p dist/yomiyasu-v3.1.0
           cp -a upstream/scripts upstream/references upstream/skills dist/yomiyasu-v3.1.0/
           cp upstream/LICENSE dist/yomiyasu-v3.1.0/
-          cd dist
-          zip -qr ../yomiyasu-v3.1.0-runtime.zip yomiyasu-v3.1.0
+          cd "$GITHUB_WORKSPACE/dist"
+          zip -qr "$GITHUB_WORKSPACE/yomiyasu-v3.1.0-runtime.zip" yomiyasu-v3.1.0
       - uses: actions/upload-artifact@v4
         with:
           name: yomiyasu-v3.1.0-runtime
