@@ -1,7 +1,10 @@
-name: yomiyasu MCP smoke test (temporary)
+name: yomiyasu MCP smoke test
 on:
   push:
     paths:
+      - mcp_entry.py
+      - server.py
+      - plain_server.py
       - .github/workflows/yomiyasu-smoke.yml
 jobs:
   smoke:
@@ -38,4 +41,9 @@ jobs:
           req=$(jq -nc --arg sid "$sid" '{jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"yomiyasu_verify",arguments:{session_id:$sid,final:"短い日本語テストです。"}}}')
           request "$req"
           jq -e '.result.structuredContent.status == "PASS"' /tmp/response.json >/dev/null
-          echo 'YOMIYASU_E2E_PASS'
+          req=$(jq -nc --arg sid "$sid" '{jsonrpc:"2.0",id:5,method:"tools/call",params:{name:"yomiyasu_verify",arguments:{session_id:$sid,final:"別の文章です。"}}}')
+          request "$req"
+          jq -e '.result.structuredContent.status == "FAIL"' /tmp/response.json >/dev/null
+          request '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"yomiyasu_check","arguments":{"source":"禁止語","final":"禁止語","forbidden":["禁止語"]}}}'
+          jq -e '.result.structuredContent.status == "FAIL" and (.result.structuredContent.forbidden_findings | length) == 1' /tmp/response.json >/dev/null
+          echo 'YOMIYASU_E2E_AND_NEGATIVE_TESTS_PASS'
