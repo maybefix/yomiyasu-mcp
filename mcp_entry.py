@@ -136,16 +136,8 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
-    def send_json(self, status: int, payload: object) -> None:
-        # Retain the existing chunked, GET-only inspection fallback for
-        # clients that cannot invoke custom MCP tools (e.g. mobile Chat).
-        self._json(status, payload)
-
     def do_GET(self) -> None:
         path = urlparse(self.path).path.rstrip("/")
-        if path.startswith(server.GATE_PREFIX + "/"):
-            return server.Handler.do_GET(self)
-
         if path == "":
             self._json(200, {"name": "yomiyasu-mcp", "status": "ok", "upstream": server.UPSTREAM_TAG})
         elif path == "/mcp":
