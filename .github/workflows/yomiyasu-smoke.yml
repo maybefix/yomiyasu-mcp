@@ -1,0 +1,41 @@
+name: yomiyasu MCP smoke test (temporary)
+on:
+  push:
+    paths:
+      - .github/workflows/yomiyasu-smoke.yml
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify production MCP JSON-RPC tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=https://yomiyasu-dependency-mcp.onrender.com/mcp
+          request() {
+            local payload="$1"
+            local code
+            code=$(curl --retry 2 --max-time 120 -sS -o /tmp/response.json -w '%{http_code}' \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json, text/event-stream' \
+              --data "$payload" "$url")
+            printf 'HTTP %s\n' "$code"
+            cat /tmp/response.json
+            echo
+            test "$code" = "200"
+            jq -e '.jsonrpc == "2.0" and (.error | not)' /tmp/response.json >/dev/null
+          }
+          request '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"github-smoke","version":"1"}}}'
+          jq -e '.result.serverInfo.name == "yomiyasu-inspector"' /tmp/response.json >/dev/null
+          request '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          jq -e '[.result.tools[].name] | index("yomiyasu_check") != null' /tmp/response.json >/dev/null
+          jq -e '[.result.tools[].name] | index("yomiyasu_verify") != null' /tmp/response.json >/dev/null
+          request '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"yomiyasu_check","arguments":{"source":"短い日本語テストです。","final":"短い日本語テストです。","forbidden":[]}}}'
+          jq -e '.result.structuredContent.status == "EXECUTED"' /tmp/response.json >/dev/null
+          sid=$(jq -r '.result.structuredContent.session_id' /tmp/response.json)
+          test -n "$sid"
+          req=$(jq -nc --arg sid "$sid" '{jsonrpc:"2.0",id:4,method:"tools/call",params:{name:"yomiyasu_verify",arguments:{session_id:$sid,final:"短い日本語テストです。"}}}')
+          request "$req"
+          jq -e '.result.structuredContent.status == "PASS"' /tmp/response.json >/dev/null
+          echo 'YOMIYASU_E2E_PASS'
