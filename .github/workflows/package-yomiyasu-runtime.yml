@@ -1,0 +1,44 @@
+name: Package official yomiyasu runtime
+on:
+  push:
+    paths:
+      - .github/workflows/package-yomiyasu-runtime.yml
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch and pin verified upstream
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v3.1.0 https://github.com/nanaism/yomiyasu.git upstream
+          test "$(git -C upstream rev-parse HEAD)" = "db78b9bc5e868549b517a037df7a4d1c93edac23"
+      - name: Run official check and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/yomiyasu-smoke
+          printf '検査の例文です。' >/tmp/yomiyasu-smoke/source.md
+          cp /tmp/yomiyasu-smoke/source.md /tmp/yomiyasu-smoke/final.md
+          python -B upstream/scripts/yomiyasu_check.py run --source /tmp/yomiyasu-smoke/source.md --final /tmp/yomiyasu-smoke/final.md --state-dir /tmp/yomiyasu-smoke/state --json >/tmp/yomiyasu-smoke/run.json
+          python -B upstream/scripts/yomiyasu_check.py verify --final /tmp/yomiyasu-smoke/final.md --state-dir /tmp/yomiyasu-smoke/state --json >/tmp/yomiyasu-smoke/verify.json
+          cat /tmp/yomiyasu-smoke/verify.json
+          python - <<'PY'
+          import json
+          r=json.load(open('/tmp/yomiyasu-smoke/verify.json'))
+          assert r.get('status')=='executed',r
+          print('OFFICIAL_YOMIYASU_CHECK_AND_VERIFY_PASS')
+          PY
+      - name: Package original scripts and rules without modification
+        run: |
+          set -euo pipefail
+          mkdir -p dist/yomiyasu-v3.1.0
+          cp -a upstream/scripts upstream/references upstream/skills dist/yomiyasu-v3.1.0/
+          cp upstream/LICENSE dist/yomiyasu-v3.1.0/
+          cd dist
+          zip -qr ../yomiyasu-v3.1.0-runtime.zip yomiyasu-v3.1.0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yomiyasu-v3.1.0-runtime
+          path: yomiyasu-v3.1.0-runtime.zip
+          if-no-files-found: error
